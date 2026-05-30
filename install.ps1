@@ -1,7 +1,10 @@
 # Hermes Agent ARM64 Windows Setup
-# One-command installer for ARM64 Windows devices (Snapdragon, etc.)
+# One-command installer for ARM64 Windows devices (Snapdragon X, Surface Pro X, etc.)
 # Hermes Agent by Nous Research: https://github.com/NousResearch/hermes-agent
-# Usage: powershell -ExecutionPolicy Bypass -File install.ps1 [-Proxy http://proxy:port] [-ApiKey sk-xxx] [-Model deepseek-v4-pro] [-Provider deepseek]
+#
+# Usage:
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -ApiKey sk-xxx
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -Proxy http://proxy:port -ApiKey sk-xxx
 
 param(
     [string]$Proxy = "",
@@ -14,6 +17,19 @@ param(
 
 $ErrorActionPreference = "Continue"
 $script:StartTime = Get-Date
+
+# Provider -> env var mapping
+$ProviderEnvVars = @{
+    "deepseek"    = "DEEPSEEK_API_KEY"
+    "openai"      = "OPENAI_API_KEY"
+    "anthropic"   = "ANTHROPIC_API_KEY"
+    "openrouter"  = "OPENROUTER_API_KEY"
+    "xai"         = "XAI_API_KEY"
+    "google"      = "GOOGLE_API_KEY"
+    "kimi"        = "KIMI_API_KEY"
+    "dashscope"   = "DASHSCOPE_API_KEY"
+    "minimax"     = "MINIMAX_API_KEY"
+}
 
 # ============================================================
 # Banner
@@ -34,19 +50,16 @@ function Show-Help {
     Write-Host "  powershell -ExecutionPolicy Bypass -File install.ps1 [options]"
     Write-Host ""
     Write-Host "Options:"
-    Write-Host "  -Proxy http://proxy:port    HTTP proxy for GitHub access"
     Write-Host "  -ApiKey sk-xxx              API key for your LLM provider"
     Write-Host "  -Model deepseek-v4-pro      Model name (default: deepseek-v4-pro)"
-    Write-Host "  -Provider deepseek          Provider name (default: deepseek)"
+    Write-Host "  -Provider deepseek          Provider: deepseek, openai, anthropic, openrouter, etc."
+    Write-Host "  -Proxy http://proxy:port    HTTP proxy for GitHub access"
     Write-Host "  -SkipWebUI                  Skip Web UI installation"
     Write-Host "  -Help                       Show this help"
     Write-Host ""
     Write-Host "Examples:"
-    Write-Host "  # Minimal install"
     Write-Host "  .\install.ps1 -ApiKey sk-xxx"
-    Write-Host ""
-    Write-Host "  # With proxy (for users in China)"
-    Write-Host "  .\install.ps1 -Proxy http://127.0.0.1:10809 -ApiKey sk-xxx"
+    Write-Host "  .\install.ps1 -Provider openai -Model gpt-4o -Proxy http://127.0.0.1:10809 -ApiKey sk-xxx"
     exit 0
 }
 
@@ -71,12 +84,12 @@ function Invoke-Detect {
 
     if ($arch -ne "ARM64") {
         Write-Warn "This installer is optimized for ARM64. Your arch is $arch."
-        Write-Warn "For x64, use the official installer: irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex"
+        Write-Warn "For x64, use: irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex"
         $continue = Read-Host "Continue anyway? (y/N)"
         if ($continue -ne "y") { exit 0 }
     }
 
-    $os = (Get-WmiObject Win32_OperatingSystem).Caption
+    $os = (Get-CimInstance Win32_OperatingSystem).Caption
     Write-OK "OS: $os"
 
     $disk = Get-PSDrive C
@@ -102,18 +115,18 @@ function Invoke-Proxy {
         Write-OK "No proxy (direct connection)"
     }
 
-    # Test connectivity
     try {
         Invoke-WebRequest -Uri "https://github.com" -TimeoutSec 10 -UseBasicParsing | Out-Null
         Write-OK "GitHub reachable"
     } catch {
-        Write-Warn "GitHub not reachable. If you are in China, use -Proxy parameter."
+        Write-Warn "GitHub not reachable. Use -Proxy parameter if needed."
         Write-Warn "Example: .\install.ps1 -Proxy http://127.0.0.1:10809 -ApiKey sk-xxx"
         if (-not $Proxy) {
-            $Proxy = Read-Host "Enter proxy URL (or press Enter to skip)"
-            if ($Proxy) {
-                $env:HTTP_PROXY = $Proxy
-                $env:HTTPS_PROXY = $Proxy
+            $userProxy = Read-Host "Enter proxy URL (or press Enter to skip)"
+            if ($userProxy) {
+                $script:Proxy = $userProxy
+                $env:HTTP_PROXY = $userProxy
+                $env:HTTPS_PROXY = $userProxy
             }
         }
     }
@@ -142,8 +155,8 @@ function Invoke-Prerequisites {
         foreach ($pkg in $needed) {
             switch ($pkg) {
                 "Node.js" { winget install OpenJS.NodeJS --silent 2>$null }
-                "Git" { winget install Git.Git --silent 2>$null }
-                "uv" { powershell -c "irm https://astral.sh/uv/install.ps1 | iex" 2>$null }
+                "Git"     { winget install Git.Git --silent 2>$null }
+                "uv"      { powershell -c "irm https://astral.sh/uv/install.ps1 | iex" 2>$null }
             }
         }
         Write-Warn "Please restart your terminal and run this script again."
@@ -188,13 +201,18 @@ function Invoke-Download {
             -OutFile $zipPath -TimeoutSec 180 -UseBasicParsing
         Write-OK "Downloaded: $([math]::Round((Get-Item $zipPath).Length/1MB, 1)) MB"
     } catch {
-        Write-Fail "Download failed. Try using a proxy: .\install.ps1 -Proxy http://proxy:port"
+        Write-Fail "Download failed. Try: .\install.ps1 -Proxy http://proxy:port"
         exit 1
     }
 
     Write-OK "Extracting..."
-    Expand-Archive -Path $zipPath -DestinationPath $hermesHome -Force
-    Rename-Item "$hermesHome\hermes-agent-main" $targetDir -Force
+    try {
+        Expand-Archive -Path $zipPath -DestinationPath $hermesHome -Force
+        Rename-Item "$hermesHome\hermes-agent-main" $targetDir -Force
+    } catch {
+        Write-Fail "Extraction failed. The ZIP may be corrupt. Try re-running."
+        exit 1
+    }
     Remove-Item $zipPath
     Write-OK "Extracted to: $targetDir"
 }
@@ -218,6 +236,8 @@ function Invoke-Venv {
     & $python -m pip install --no-deps -e $targetDir -q 2>&1 | Out-Null
 
     Write-OK "Installing remaining dependencies..."
+    # NOTE: These versions are pinned for hermes-agent v0.15.x.
+    # If a newer hermes-agent requires different versions, update this list.
     $deps = @(
         "openai==2.24.0", "python-dotenv", "fire", "httpx[socks]", "rich",
         "tenacity", "pyyaml", "ruamel.yaml", "requests", "jinja2",
@@ -246,16 +266,23 @@ function Invoke-Configure {
     $hermesHome = "$env:LOCALAPPDATA\hermes"
     New-Item -ItemType Directory -Force -Path $hermesHome | Out-Null
 
+    # Use the correct env var for this provider
+    $envVarName = $ProviderEnvVars[$Provider.ToLower()]
+    if (-not $envVarName) {
+        $envVarName = $Provider.ToUpper() + "_API_KEY"
+    }
+
     if ($ApiKey) {
         @"
-DEEPSEEK_API_KEY=$ApiKey
+$envVarName=$ApiKey
 API_SERVER_ENABLED=true
 "@ | Out-File -FilePath "$hermesHome\.env" -Encoding ascii
+        Write-OK "$envVarName configured"
     } else {
         Write-Warn "No API key provided. Add it to: $hermesHome\.env"
         @"
-# Add your API key here. Example:
-# DEEPSEEK_API_KEY=sk-xxx
+# Add your API key here:
+# $envVarName=sk-xxx
 API_SERVER_ENABLED=true
 "@ | Out-File -FilePath "$hermesHome\.env" -Encoding ascii
     }
@@ -266,7 +293,7 @@ model:
   default: $Model
   provider: $Provider
 "@ | Out-File -FilePath "$hermesHome\config.yaml" -Encoding utf8
-    Write-OK "Model: $Model / $Provider"
+    Write-OK "Model: $Model / Provider: $Provider"
 
     # Add to PATH
     $scriptDir = "$hermesHome\hermes-agent\venv\Scripts"
@@ -341,6 +368,10 @@ function Main {
     Write-Host "Quick start:" -ForegroundColor Cyan
     Write-Host "  hermes chat -q 'Hello!'"
     Write-Host "  Web UI: http://localhost:8648"
+    Write-Host ""
+    Write-Host "To uninstall, delete these folders:" -ForegroundColor Cyan
+    Write-Host "  $env:LOCALAPPDATA\hermes"
+    Write-Host "  $env:USERPROFILE\.hermes-web-ui"
     Write-Host ""
     Write-Host "Hermes Agent by Nous Research: https://github.com/NousResearch/hermes-agent"
 }

@@ -5,6 +5,9 @@
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -ApiKey sk-xxx
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Proxy http://proxy:port -ApiKey sk-xxx
+#
+# TIP: If you see "running scripts is disabled", run this first:
+#   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 param(
     [string]$Proxy = "",
@@ -60,6 +63,10 @@ function Show-Help {
     Write-Host "Examples:"
     Write-Host "  .\install.ps1 -ApiKey sk-xxx"
     Write-Host "  .\install.ps1 -Provider openai -Model gpt-4o -Proxy http://127.0.0.1:10809 -ApiKey sk-xxx"
+    Write-Host ""
+    Write-Host "Troubleshooting:"
+    Write-Host "  If you see 'running scripts is disabled', run:"
+    Write-Host "    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass"
     exit 0
 }
 
@@ -229,8 +236,10 @@ function Invoke-Venv {
     Write-OK "Creating venv with ARM64 Python..."
     uv venv --python cpython-3.11 "$targetDir\venv" 2>&1 | Out-Null
 
-    Write-OK "Installing psutil (pre-built wheel)..."
-    & $python -m pip install psutil --only-binary :all: -q 2>&1 | Out-Null
+    Write-OK "Installing psutil==7.1.1 (only ARM64 wheel available)..."
+    # Pinned to 7.1.1 — the last version with a published ARM64 wheel.
+    # 7.2.2+ require source compilation (Visual C++ Build Tools ~5 GB).
+    & $python -m pip install psutil==7.1.1 --only-binary :all: -q 2>&1 | Out-Null
 
     Write-OK "Installing hermes-agent core..."
     & $python -m pip install --no-deps -e $targetDir -q 2>&1 | Out-Null
@@ -242,7 +251,8 @@ function Invoke-Venv {
         "openai==2.24.0", "python-dotenv", "fire", "httpx[socks]", "rich",
         "tenacity", "pyyaml", "ruamel.yaml", "requests", "jinja2",
         "pydantic", "prompt_toolkit", "croniter", "PyJWT[crypto]", "tzdata",
-        "simple-term-menu", "fastapi", "uvicorn"
+        "simple-term-menu", "fastapi", "uvicorn",
+        "pywin32"  # Required for Windows-specific features (service mgmt, COM, etc.)
     )
     foreach ($dep in $deps) {
         & $python -m pip install $dep --no-cache-dir -q 2>&1 | Out-Null
@@ -322,6 +332,9 @@ IconIndex=130
 "@ | Out-File -FilePath "$env:USERPROFILE\Desktop\Hermes AI.url" -Encoding ascii
     Write-OK "Desktop shortcut created"
 
+    # Refresh PATH for this session so hermes is available immediately
+    $env:Path = "$venvScripts;" + [Environment]::GetEnvironmentVariable("Path", "User")
+
     # Web UI
     if (-not $SkipWebUI) {
         Write-OK "Installing Web UI..."
@@ -335,10 +348,29 @@ IconIndex=130
             -Principal $principal -Force | Out-Null
         Write-OK "Web UI auto-start registered"
 
+        # Start Web UI now with health check
         $env:HERMES_HOME = $hermesHome
-        $env:Path = "$venvScripts;$env:Path"
+        Write-OK "Starting Web UI..."
         hermes-web-ui start 2>&1 | Out-Null
-        Write-OK "Web UI starting at http://localhost:8648"
+
+        # Health check: retry up to 10 times (5 seconds)
+        $healthy = $false
+        for ($i = 1; $i -le 10; $i++) {
+            Start-Sleep -Milliseconds 500
+            try {
+                $r = Invoke-WebRequest -Uri "http://localhost:8648" -TimeoutSec 2 -UseBasicParsing
+                if ($r.StatusCode -eq 200) {
+                    $healthy = $true
+                    break
+                }
+            } catch {}
+        }
+        if ($healthy) {
+            Write-OK "Web UI running at http://localhost:8648"
+        } else {
+            Write-Warn "Web UI may still be starting. Check: http://localhost:8648"
+            Write-Warn "If the page doesn't load, run: hermes-web-ui restart"
+        }
     }
 
     Write-OK "Testing Hermes..."

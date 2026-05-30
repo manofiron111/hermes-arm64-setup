@@ -7,6 +7,8 @@
 
 **Hermes Agent** is an open-source AI agent framework by [Nous Research](https://nousresearch.com/). This project provides a compatibility installer for ARM64 Windows (Snapdragon X, Surface Pro X, Huawei MateBook E, etc.) where the official installer may encounter ARM64-specific issues.
 
+**Supported Hermes Agent versions:** v0.15.x (tested with v0.15.1). Newer versions may work but have not been verified.
+
 ---
 
 ## Quick Start
@@ -62,7 +64,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -Proxy http://127.0.0.1:108
 5. **Downloads** Hermes Agent source as ZIP (avoids ARM64 Git issues)
 6. **Sets up** Python venv + installs all dependencies with ARM64 workarounds
 7. **Configures** API key, model, provider (auto-selects correct env var per provider)
-8. **Post-install**: desktop shortcut, optional Web UI with auto-start
+8. **Post-install**: desktop shortcut, optional Web UI with auto-start + health check
 
 ---
 
@@ -76,7 +78,7 @@ The [official Hermes Agent installer](https://github.com/NousResearch/hermes-age
 | **Git Clone** | `git clone` with submodules | ARM64 Git's `sh.exe` fails ("Function not implemented"); submodules error out | Downloads ZIP archive from GitHub instead of cloning |
 | **psutil** | `psutil==7.2.2` compiled from source | No ARM64 wheel for 7.2.2; compilation requires Visual C++ Build Tools (~5 GB) | Installs `psutil==7.1.1` pre-built wheel; API-compatible |
 | **Dependencies** | `pip install -e .[cli]` resolves all at once | Resolver re-downloads psutil 7.2.2 source, fails to build | Installs hermes-agent with `--no-deps`, then installs deps individually |
-| **Web UI** | hermes-web-ui via npm | Works but stability varies; boot can hang on gateway auto-start | Installs with Task Scheduler auto-start; `-SkipWebUI` flag available |
+| **Web UI** | hermes-web-ui via npm | Works but stability varies; boot can hang on gateway auto-start | Installs with Task Scheduler auto-start; `-SkipWebUI` flag available; health check with retry |
 | **GitHub Access** | Direct connection assumed | GitHub may be unreachable in some regions | Built-in `-Proxy` parameter; interactive fallback prompt |
 | **API Key** | User must know correct env var name | Easy to use wrong env var for non-DeepSeek providers | Auto-selects correct env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.) |
 
@@ -116,6 +118,45 @@ hermes chat                     # Interactive session
 
 ---
 
+## Updating
+
+When a new version of Hermes Agent is released:
+
+```powershell
+# 1. Download the updated installer
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/manofiron111/hermes-arm64-setup/main/install.ps1 -OutFile install.ps1
+
+# 2. Run with your existing credentials
+powershell -ExecutionPolicy Bypass -File install.ps1 -ApiKey sk-your-key-here
+```
+
+The installer will remove the previous installation and reinstall cleanly. Your API key and configuration will be preserved in `$env:LOCALAPPDATA\hermes\.env`.
+
+**Note:** If the dependency list (`$deps` in `Invoke-Venv`) is outdated for a new Hermes Agent version, you'll see import errors. Please [open an issue](https://github.com/manofiron111/hermes-arm64-setup/issues) with the error output.
+
+---
+
+## Known Issues
+
+### Web UI stability on ARM64
+
+The `hermes-web-ui` npm package (v0.6.5) has known stability issues on ARM64 Windows due to native `rollup` module compatibility. Symptoms include:
+- Gateway bootstrap hangs at startup
+- Process crashes silently after a few hours
+- `localhost:8648` returns "connection refused" after working initially
+
+**Workaround:** Use the `hermes chat` CLI directly, or run `hermes-web-ui restart` when the UI becomes unresponsive. This is an upstream issue tracked by Nous Research — not specific to this installer.
+
+### Git submodules on ARM64
+
+Git for ARM64 Windows has a known limitation where `sh.exe` fails with "Function not implemented" when running submodule operations. This installer avoids Git entirely (uses ZIP download). For general Git usage on ARM64, basic clone/push/pull work; avoid submodules.
+
+### `winget` not available on some Windows 10 builds
+
+Older Windows 10 ARM64 builds may not include `winget`. If prerequisite installation fails, install Node.js, Git, and uv manually before running this script.
+
+---
+
 ## Uninstall
 
 ```powershell
@@ -147,7 +188,7 @@ Unregister-ScheduledTask -TaskName "HermesWebUI" -Confirm:$false
 
 Should not happen with this installer. If it does:
 ```powershell
-pip install psutil --only-binary :all:
+pip install psutil==7.1.1 --only-binary :all:
 ```
 
 ### Web UI starts but `localhost:8648` shows nothing
@@ -180,6 +221,12 @@ systeminfo | findstr "System Type"
 ```
 The installer will prompt to continue anyway.
 
+### "Running scripts is disabled" error
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
 ---
 
 ## Requirements
@@ -188,6 +235,24 @@ The installer will prompt to continue anyway.
 - 5 GB free disk space
 - Internet connection (HTTP proxy supported)
 - PowerShell 5.1+
+
+---
+
+## Contributing
+
+Contributions are welcome — especially:
+
+- **Test reports** from devices not yet listed above
+- **Fixes** for new ARM64-specific issues with newer Hermes Agent versions
+- **Dependency updates** when `$deps` in `Invoke-Venv` needs refreshing
+
+To contribute:
+1. Fork the repository
+2. Make your changes (focus on `install.ps1`)
+3. Test on an ARM64 Windows device
+4. Open a pull request with a description of what you changed and why
+
+Please keep the installer self-contained: no additional files unless absolutely necessary.
 
 ---
 

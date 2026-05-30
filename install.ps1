@@ -1,0 +1,348 @@
+# Hermes Agent ARM64 Windows Setup
+# One-command installer for ARM64 Windows devices (Snapdragon, etc.)
+# Hermes Agent by Nous Research: https://github.com/NousResearch/hermes-agent
+# Usage: powershell -ExecutionPolicy Bypass -File install.ps1 [-Proxy http://proxy:port] [-ApiKey sk-xxx] [-Model deepseek-v4-pro] [-Provider deepseek]
+
+param(
+    [string]$Proxy = "",
+    [string]$ApiKey = "",
+    [string]$Model = "deepseek-v4-pro",
+    [string]$Provider = "deepseek",
+    [switch]$SkipWebUI = $false,
+    [switch]$Help = $false
+)
+
+$ErrorActionPreference = "Continue"
+$script:StartTime = Get-Date
+
+# ============================================================
+# Banner
+# ============================================================
+function Show-Banner {
+    Write-Host @"
+================================================
+  Hermes Agent - ARM64 Windows Installer
+  For Snapdragon / ARM-based Windows devices
+  Hermes Agent by Nous Research
+================================================
+"@ -ForegroundColor Cyan
+}
+
+function Show-Help {
+    Show-Banner
+    Write-Host "Usage:"
+    Write-Host "  powershell -ExecutionPolicy Bypass -File install.ps1 [options]"
+    Write-Host ""
+    Write-Host "Options:"
+    Write-Host "  -Proxy http://proxy:port    HTTP proxy for GitHub access"
+    Write-Host "  -ApiKey sk-xxx              API key for your LLM provider"
+    Write-Host "  -Model deepseek-v4-pro      Model name (default: deepseek-v4-pro)"
+    Write-Host "  -Provider deepseek          Provider name (default: deepseek)"
+    Write-Host "  -SkipWebUI                  Skip Web UI installation"
+    Write-Host "  -Help                       Show this help"
+    Write-Host ""
+    Write-Host "Examples:"
+    Write-Host "  # Minimal install"
+    Write-Host "  .\install.ps1 -ApiKey sk-xxx"
+    Write-Host ""
+    Write-Host "  # With proxy (for users in China)"
+    Write-Host "  .\install.ps1 -Proxy http://127.0.0.1:10809 -ApiKey sk-xxx"
+    exit 0
+}
+
+if ($Help) { Show-Help }
+
+# ============================================================
+# Helpers
+# ============================================================
+function Write-Step { Write-Host "`n>>> $args" -ForegroundColor Yellow }
+function Write-OK { Write-Host "    [OK] $args" -ForegroundColor Green }
+function Write-Warn { Write-Host "    [WARN] $args" -ForegroundColor Yellow }
+function Write-Fail { Write-Host "    [FAIL] $args" -ForegroundColor Red }
+
+# ============================================================
+# Step 1: Detect Environment
+# ============================================================
+function Invoke-Detect {
+    Write-Step "Step 1/8: Detecting environment..."
+
+    $arch = $env:PROCESSOR_ARCHITECTURE
+    Write-OK "Architecture: $arch"
+
+    if ($arch -ne "ARM64") {
+        Write-Warn "This installer is optimized for ARM64. Your arch is $arch."
+        Write-Warn "For x64, use the official installer: irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex"
+        $continue = Read-Host "Continue anyway? (y/N)"
+        if ($continue -ne "y") { exit 0 }
+    }
+
+    $os = (Get-WmiObject Win32_OperatingSystem).Caption
+    Write-OK "OS: $os"
+
+    $disk = Get-PSDrive C
+    $freeGB = [math]::Round($disk.Free/1GB, 1)
+    Write-OK "Disk: $freeGB GB free"
+    if ($freeGB -lt 5) {
+        Write-Fail "Less than 5GB free. Please free up space."
+        exit 1
+    }
+}
+
+# ============================================================
+# Step 2: Configure Proxy
+# ============================================================
+function Invoke-Proxy {
+    Write-Step "Step 2/8: Configuring network..."
+
+    if ($Proxy) {
+        $env:HTTP_PROXY = $Proxy
+        $env:HTTPS_PROXY = $Proxy
+        Write-OK "Proxy set: $Proxy"
+    } else {
+        Write-OK "No proxy (direct connection)"
+    }
+
+    # Test connectivity
+    try {
+        Invoke-WebRequest -Uri "https://github.com" -TimeoutSec 10 -UseBasicParsing | Out-Null
+        Write-OK "GitHub reachable"
+    } catch {
+        Write-Warn "GitHub not reachable. If you are in China, use -Proxy parameter."
+        Write-Warn "Example: .\install.ps1 -Proxy http://127.0.0.1:10809 -ApiKey sk-xxx"
+        if (-not $Proxy) {
+            $Proxy = Read-Host "Enter proxy URL (or press Enter to skip)"
+            if ($Proxy) {
+                $env:HTTP_PROXY = $Proxy
+                $env:HTTPS_PROXY = $Proxy
+            }
+        }
+    }
+}
+
+# ============================================================
+# Step 3: Check/Install Prerequisites
+# ============================================================
+function Invoke-Prerequisites {
+    Write-Step "Step 3/8: Checking prerequisites..."
+
+    $needed = @()
+
+    try { $nv = (node --version 2>$null); Write-OK "Node.js: $nv" }
+    catch { $needed += "Node.js"; Write-Warn "Node.js not found" }
+
+    try { $gv = (git --version 2>$null); Write-OK "Git: $gv" }
+    catch { $needed += "Git"; Write-Warn "Git not found" }
+
+    try { $uv = (uv --version 2>$null); Write-OK "uv: $uv" }
+    catch { $needed += "uv"; Write-Warn "uv not found" }
+
+    if ($needed.Count -gt 0) {
+        Write-Warn "Missing: $($needed -join ', ')"
+        Write-Warn "Attempting to install via winget..."
+        foreach ($pkg in $needed) {
+            switch ($pkg) {
+                "Node.js" { winget install OpenJS.NodeJS --silent 2>$null }
+                "Git" { winget install Git.Git --silent 2>$null }
+                "uv" { powershell -c "irm https://astral.sh/uv/install.ps1 | iex" 2>$null }
+            }
+        }
+        Write-Warn "Please restart your terminal and run this script again."
+        exit 0
+    }
+}
+
+# ============================================================
+# Step 4: Install ARM64 Python
+# ============================================================
+function Invoke-Python {
+    Write-Step "Step 4/8: Installing ARM64 Python 3.11..."
+
+    $existing = uv python list 2>&1 | Select-String "aarch64"
+    if ($existing) {
+        Write-OK "ARM64 Python already installed"
+    } else {
+        Write-OK "Downloading ARM64 Python 3.11..."
+        uv python install cpython-3.11-windows-arm64-none 2>&1 | Out-Null
+        Write-OK "ARM64 Python installed"
+    }
+}
+
+# ============================================================
+# Step 5: Download and Extract Hermes
+# ============================================================
+function Invoke-Download {
+    Write-Step "Step 5/8: Downloading Hermes Agent..."
+
+    $hermesHome = "$env:LOCALAPPDATA\hermes"
+    $targetDir = "$hermesHome\hermes-agent"
+    $zipPath = "$env:TEMP\hermes-main.zip"
+
+    if (Test-Path $targetDir) {
+        Write-OK "Removing previous installation..."
+        Remove-Item -Recurse -Force $targetDir
+    }
+
+    Write-OK "Downloading from GitHub..."
+    try {
+        Invoke-WebRequest -Uri "https://github.com/NousResearch/hermes-agent/archive/refs/heads/main.zip" `
+            -OutFile $zipPath -TimeoutSec 180 -UseBasicParsing
+        Write-OK "Downloaded: $([math]::Round((Get-Item $zipPath).Length/1MB, 1)) MB"
+    } catch {
+        Write-Fail "Download failed. Try using a proxy: .\install.ps1 -Proxy http://proxy:port"
+        exit 1
+    }
+
+    Write-OK "Extracting..."
+    Expand-Archive -Path $zipPath -DestinationPath $hermesHome -Force
+    Rename-Item "$hermesHome\hermes-agent-main" $targetDir -Force
+    Remove-Item $zipPath
+    Write-OK "Extracted to: $targetDir"
+}
+
+# ============================================================
+# Step 6: Setup Python Environment
+# ============================================================
+function Invoke-Venv {
+    Write-Step "Step 6/8: Setting up Python environment..."
+
+    $targetDir = "$env:LOCALAPPDATA\hermes\hermes-agent"
+    $python = "$targetDir\venv\Scripts\python.exe"
+
+    Write-OK "Creating venv with ARM64 Python..."
+    uv venv --python cpython-3.11 "$targetDir\venv" 2>&1 | Out-Null
+
+    Write-OK "Installing psutil (pre-built wheel)..."
+    & $python -m pip install psutil --only-binary :all: -q 2>&1 | Out-Null
+
+    Write-OK "Installing hermes-agent core..."
+    & $python -m pip install --no-deps -e $targetDir -q 2>&1 | Out-Null
+
+    Write-OK "Installing remaining dependencies..."
+    $deps = @(
+        "openai==2.24.0", "python-dotenv", "fire", "httpx[socks]", "rich",
+        "tenacity", "pyyaml", "ruamel.yaml", "requests", "jinja2",
+        "pydantic", "prompt_toolkit", "croniter", "PyJWT[crypto]", "tzdata",
+        "simple-term-menu", "fastapi", "uvicorn"
+    )
+    foreach ($dep in $deps) {
+        & $python -m pip install $dep --no-cache-dir -q 2>&1 | Out-Null
+    }
+    Write-OK "All dependencies installed"
+
+    $result = & $python -c "import hermes_cli; print('OK')" 2>&1
+    if ($result -match "OK") {
+        Write-OK "hermes_cli verified"
+    } else {
+        Write-Fail "hermes_cli import failed: $result"
+    }
+}
+
+# ============================================================
+# Step 7: Configure
+# ============================================================
+function Invoke-Configure {
+    Write-Step "Step 7/8: Configuring Hermes..."
+
+    $hermesHome = "$env:LOCALAPPDATA\hermes"
+    New-Item -ItemType Directory -Force -Path $hermesHome | Out-Null
+
+    if ($ApiKey) {
+        @"
+DEEPSEEK_API_KEY=$ApiKey
+API_SERVER_ENABLED=true
+"@ | Out-File -FilePath "$hermesHome\.env" -Encoding ascii
+    } else {
+        Write-Warn "No API key provided. Add it to: $hermesHome\.env"
+        @"
+# Add your API key here. Example:
+# DEEPSEEK_API_KEY=sk-xxx
+API_SERVER_ENABLED=true
+"@ | Out-File -FilePath "$hermesHome\.env" -Encoding ascii
+    }
+    Write-OK ".env configured"
+
+    @"
+model:
+  default: $Model
+  provider: $Provider
+"@ | Out-File -FilePath "$hermesHome\config.yaml" -Encoding utf8
+    Write-OK "Model: $Model / $Provider"
+
+    # Add to PATH
+    $scriptDir = "$hermesHome\hermes-agent\venv\Scripts"
+    $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($currentPath -notlike "*$scriptDir*") {
+        [Environment]::SetEnvironmentVariable("Path", "$currentPath;$scriptDir", "User")
+        Write-OK "Added to user PATH"
+    }
+}
+
+# ============================================================
+# Step 8: Post-Install
+# ============================================================
+function Invoke-PostInstall {
+    Write-Step "Step 8/8: Post-install..."
+
+    $hermesHome = "$env:LOCALAPPDATA\hermes"
+    $venvScripts = "$hermesHome\hermes-agent\venv\Scripts"
+
+    # Desktop shortcut
+    @"
+[InternetShortcut]
+URL=http://localhost:8648
+IconFile=$env:SystemRoot\System32\SHELL32.dll
+IconIndex=130
+"@ | Out-File -FilePath "$env:USERPROFILE\Desktop\Hermes AI.url" -Encoding ascii
+    Write-OK "Desktop shortcut created"
+
+    # Web UI
+    if (-not $SkipWebUI) {
+        Write-OK "Installing Web UI..."
+        npm install -g hermes-web-ui@latest 2>&1 | Out-Null
+
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" `
+            -Argument "-WindowStyle Hidden -Command `"`$env:HERMES_HOME='$hermesHome'; `$env:Path='$venvScripts;' + [Environment]::GetEnvironmentVariable('Path','Machine'); hermes-web-ui start`""
+        $trigger = New-ScheduledTaskTrigger -AtLogon
+        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+        Register-ScheduledTask -TaskName "HermesWebUI" -Action $action -Trigger $trigger `
+            -Principal $principal -Force | Out-Null
+        Write-OK "Web UI auto-start registered"
+
+        $env:HERMES_HOME = $hermesHome
+        $env:Path = "$venvScripts;$env:Path"
+        hermes-web-ui start 2>&1 | Out-Null
+        Write-OK "Web UI starting at http://localhost:8648"
+    }
+
+    Write-OK "Testing Hermes..."
+    & "$venvScripts\hermes.exe" --version 2>&1 | ForEach { Write-OK $_ }
+}
+
+# ============================================================
+# Main
+# ============================================================
+function Main {
+    Show-Banner
+    Invoke-Detect
+    Invoke-Proxy
+    Invoke-Prerequisites
+    Invoke-Python
+    Invoke-Download
+    Invoke-Venv
+    Invoke-Configure
+    Invoke-PostInstall
+
+    $elapsed = [math]::Round(((Get-Date) - $script:StartTime).TotalMinutes, 1)
+    Write-Host ""
+    Write-Host "================================================" -ForegroundColor Green
+    Write-Host "  Installation complete! ($elapsed min)" -ForegroundColor Green
+    Write-Host "================================================" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Quick start:" -ForegroundColor Cyan
+    Write-Host "  hermes chat -q 'Hello!'"
+    Write-Host "  Web UI: http://localhost:8648"
+    Write-Host ""
+    Write-Host "Hermes Agent by Nous Research: https://github.com/NousResearch/hermes-agent"
+}
+
+Main

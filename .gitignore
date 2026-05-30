@@ -1,0 +1,17 @@
+# Windows
+*.exe
+*.msi
+*.tmp
+Thumbs.db
+
+# Archives
+*.zip
+*.tar.gz
+*.7z
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
